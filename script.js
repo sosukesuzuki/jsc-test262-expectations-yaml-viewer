@@ -1,5 +1,9 @@
 let allTests = [];
 let filteredTests = [];
+let selectedCategories = new Set();
+let allCategories = new Map();
+let categoryHierarchy = new Map();
+let expandedCategories = new Set();
 
 const GITHUB_API_URL = 'https://api.github.com/repos/WebKit/WebKit/contents/JSTests/test262/expectations.yaml';
 const TEST262_BASE_URL = 'https://github.com/tc39/test262/blob/main/';
@@ -47,6 +51,9 @@ function parseYaml(yamlContent) {
             
             tests.push(test);
         }
+        
+        // Extract categories from test paths
+        extractCategories(tests);
         
         return tests;
     } catch (error) {
@@ -118,18 +125,7 @@ function updateStats() {
 }
 
 function filterTests(searchTerm) {
-    if (!searchTerm) {
-        filteredTests = allTests;
-    } else {
-        const term = searchTerm.toLowerCase();
-        filteredTests = allTests.filter(test => 
-            test.path.toLowerCase().includes(term) ||
-            Object.values(test.modes).some(error => 
-                error.toLowerCase().includes(term)
-            )
-        );
-    }
-    renderTests(filteredTests);
+    applyFilters();
 }
 
 function showLoading(show) {
@@ -152,12 +148,170 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function extractCategories(tests) {
+    allCategories.clear();
+    categoryHierarchy.clear();
+    
+    tests.forEach(test => {
+        const parts = test.path.split('/');
+        let currentPath = '';
+        
+        // Skip 'test' prefix if present
+        const startIdx = parts[0] === 'test' ? 1 : 0;
+        
+        // Build hierarchical categories (up to 3 levels deep)
+        for (let i = startIdx; i < Math.min(parts.length - 1, startIdx + 3); i++) {
+            const part = parts[i];
+            if (!part) break;
+            
+            if (currentPath) {
+                currentPath += '/';
+            }
+            currentPath += part;
+            
+            // Count tests in this category
+            allCategories.set(currentPath, (allCategories.get(currentPath) || 0) + 1);
+            
+            // Build hierarchy - add to parent's children
+            const parentPath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            if (parentPath && i > startIdx) {
+                if (!categoryHierarchy.has(parentPath)) {
+                    categoryHierarchy.set(parentPath, new Set());
+                }
+                categoryHierarchy.get(parentPath).add(currentPath);
+            }
+        }
+    });
+}
+
+function renderCategories() {
+    const categoriesContainer = document.getElementById('categories');
+    if (!categoriesContainer) return;
+    
+    // Get top-level categories
+    const topLevelCategories = Array.from(allCategories.entries())
+        .filter(([path]) => !path.includes('/'))
+        .sort((a, b) => b[1] - a[1]);
+    
+    const html = topLevelCategories.map(([category, count]) => {
+        return renderCategoryItem(category, count, 0);
+    }).join('');
+    
+    categoriesContainer.innerHTML = `<div class="category-tree">${html}</div>`;
+    
+    // Add click handlers
+    categoriesContainer.querySelectorAll('.category-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const category = e.target.closest('.category-btn').dataset.category;
+            toggleCategory(category);
+        });
+    });
+    
+    categoriesContainer.querySelectorAll('.category-expand').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const category = e.target.closest('.category-item').dataset.category;
+            toggleExpand(category);
+        });
+    });
+}
+
+function renderCategoryItem(category, count, level) {
+    const isSelected = selectedCategories.has(category);
+    const hasChildren = categoryHierarchy.has(category);
+    const isExpanded = expandedCategories.has(category);
+    const displayName = category.split('/').pop();
+    
+    let html = `<div class="category-item" data-category="${escapeHtml(category)}" style="margin-left: ${level * 20}px;">`;
+    
+    if (hasChildren) {
+        html += `<button class="category-expand ${isExpanded ? 'expanded' : ''}">${isExpanded ? '▼' : '▶'}</button>`;
+    } else {
+        html += `<span class="category-expand-placeholder"></span>`;
+    }
+    
+    html += `<button class="category-btn ${isSelected ? 'active' : ''}" data-category="${escapeHtml(category)}">
+                ${escapeHtml(category)} (${count})
+             </button>`;
+    
+    if (hasChildren && isExpanded) {
+        const children = Array.from(categoryHierarchy.get(category))
+            .map(child => [child, allCategories.get(child) || 0])
+            .sort((a, b) => b[1] - a[1]);
+        
+        html += '<div class="category-children">';
+        children.forEach(([childCategory, childCount]) => {
+            html += renderCategoryItem(childCategory, childCount, level + 1);
+        });
+        html += '</div>';
+    }
+    
+    html += '</div>';
+    return html;
+}
+
+function toggleExpand(category) {
+    if (expandedCategories.has(category)) {
+        expandedCategories.delete(category);
+    } else {
+        expandedCategories.add(category);
+    }
+    renderCategories();
+}
+
+function toggleCategory(category) {
+    if (selectedCategories.has(category)) {
+        selectedCategories.delete(category);
+    } else {
+        selectedCategories.add(category);
+    }
+    
+    applyFilters();
+    renderCategories();
+}
+
+function applyFilters() {
+    const searchTerm = document.getElementById('searchInput').value;
+    
+    filteredTests = allTests.filter(test => {
+        // Apply category filter
+        if (selectedCategories.size > 0) {
+            // Check if test matches any selected category
+            let matches = false;
+            const testPathNormalized = test.path.startsWith('test/') ? test.path.substring(5) : test.path;
+            
+            for (const selectedCategory of selectedCategories) {
+                if (testPathNormalized.startsWith(selectedCategory + '/') || testPathNormalized === selectedCategory) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) return false;
+        }
+        
+        // Apply text search filter
+        if (searchTerm) {
+            const term = searchTerm.toLowerCase();
+            return test.path.toLowerCase().includes(term) ||
+                   Object.values(test.modes).some(error => 
+                       error.toLowerCase().includes(term)
+                   );
+        }
+        
+        return true;
+    });
+    
+    renderTests(filteredTests);
+}
+
 async function loadData() {
     try {
         const yamlContent = await fetchExpectationsYaml();
         allTests = parseYaml(yamlContent);
         filteredTests = allTests;
         updateStats();
+        renderCategories();
         renderTests(allTests);
     } catch (error) {
         console.error('Failed to load data:', error);
